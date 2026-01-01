@@ -6,14 +6,12 @@ interface WebhookPreviewProps {
 }
 
 const WebhookPreview: React.FC<WebhookPreviewProps> = ({ payload }) => {
-  // Helper to convert integer color to hex string
   const getColorHex = (colorInt?: number) => {
-    if (colorInt === undefined || colorInt === null) return '#202225'; // Default border color
+    if (colorInt === undefined || colorInt === null) return '#202225';
     return '#' + colorInt.toString(16).padStart(6, '0');
   };
 
   const renderComponent = (component: DiscordComponent, index: number) => {
-    // Action Row (Type 1) is a container
     if (component.type === 1) {
       return (
         <div key={index} className="flex flex-wrap gap-3 mb-2">
@@ -29,7 +27,7 @@ const WebhookPreview: React.FC<WebhookPreviewProps> = ({ payload }) => {
         2: 'bg-[#4E5058] hover:bg-[#6D6F78] text-white', // Secondary
         3: 'bg-[#248046] hover:bg-[#1a6334] text-white', // Success
         4: 'bg-[#DA373C] hover:bg-[#a1282c] text-white', // Danger
-        5: 'bg-[#4E5058] hover:bg-[#6D6F78] text-white', // Link
+        5: 'bg-[#4E5058] hover:bg-[#6D6F78] text-white', // Link?
       };
 
       const btnClass = styleClasses[component.style || 1] || styleClasses[1];
