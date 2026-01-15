@@ -6,9 +6,9 @@ export const validateWebhook = async (url: string): Promise<boolean> => {
   return regex.test(url);
 };
 
-export const getWebhookDetails = async (url: string): Promise<{ name?: string, avatar_url?: string } | null> => {
+export const getWebhookDetails = async (url: string, signal?: AbortSignal): Promise<{ name?: string, avatar_url?: string } | null> => {
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, { signal });
     if (!response.ok) return null;
     
     const data = await response.json();

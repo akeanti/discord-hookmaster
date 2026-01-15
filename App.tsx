@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { WebhookPayload, DiscordEmbed, SavedWebhook, DiscordComponent, AllowedMentions } from './types';
+import { WebhookPayload, SavedWebhook } from './types';
 import WebhookPreview from './components/WebhookPreview';
 import { sendWebhook, validateWebhook, getWebhookDetails } from './services/discordService';
 
@@ -35,6 +35,17 @@ const DEFAULT_PAYLOAD: WebhookPayload = {
   ],
   components: [],
   allowed_mentions: { parse: ['users', 'roles', 'everyone'] }
+};
+
+const normalizePayload = (payload: WebhookPayload): WebhookPayload => {
+  const allowedMentions = payload.allowed_mentions ?? { parse: [] };
+  return {
+    ...payload,
+    allowed_mentions: {
+      ...allowedMentions,
+      parse: allowedMentions.parse ?? []
+    }
+  };
 };
 
 const TEMPLATES: { name: string; payload: WebhookPayload }[] = [
@@ -159,34 +170,67 @@ const App: React.FC = () => {
   const [webhookUrl, setWebhookUrl] = useState('');
   const [isValidUrl, setIsValidUrl] = useState<boolean | null>(null);
   const [payload, setPayload] = useState<WebhookPayload>(DEFAULT_PAYLOAD);
+  const [jsonText, setJsonText] = useState(() => JSON.stringify(DEFAULT_PAYLOAD, null, 2));
+  const [jsonError, setJsonError] = useState<string | null>(null);
   const [history, setHistory] = useState<SavedWebhook[]>([]);
   const [files, setFiles] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
   const [expandedEmbeds, setExpandedEmbeds] = useState<number[]>([0]);
+  const [rememberUrl, setRememberUrl] = useState(true);
+  const validationTimeoutRef = useRef<number | null>(null);
+  const validationRequestRef = useRef(0);
+  const detailsAbortRef = useRef<AbortController | null>(null);
+  const allowedMentionsParse = payload.allowed_mentions?.parse ?? [];
 
   // Init
   useEffect(() => {
     const saved = localStorage.getItem('be_history');
     if (saved) setHistory(JSON.parse(saved));
+    const remember = localStorage.getItem('be_remember_url');
+    if (remember !== null) setRememberUrl(remember === 'true');
     const lastUrl = localStorage.getItem('be_last_url');
-    if (lastUrl) handleUrlChange(lastUrl);
+    if (lastUrl && (remember === null || remember === 'true')) handleUrlChange(lastUrl);
   }, []);
 
-  const handleUrlChange = async (url: string) => {
-    setWebhookUrl(url);
-    localStorage.setItem('be_last_url', url);
-    if (url.length > 20) {
-      const valid = await validateWebhook(url);
-      setIsValidUrl(valid);
-      if (valid) {
-        const details = await getWebhookDetails(url);
-        if (details) {
-          setPayload(p => ({ ...p, username: details.name || p.username, avatar_url: details.avatar_url || p.avatar_url }));
-        }
-      }
-    } else {
-      setIsValidUrl(null);
+  useEffect(() => {
+    if (activeView === 'json' && !jsonError) {
+      setJsonText(JSON.stringify(payload, null, 2));
     }
+  }, [payload, activeView, jsonError]);
+
+  useEffect(() => {
+    return () => {
+      if (validationTimeoutRef.current) window.clearTimeout(validationTimeoutRef.current);
+      if (detailsAbortRef.current) detailsAbortRef.current.abort();
+    };
+  }, []);
+
+  const handleUrlChange = (url: string) => {
+    setWebhookUrl(url);
+    if (rememberUrl) localStorage.setItem('be_last_url', url);
+    if (validationTimeoutRef.current) window.clearTimeout(validationTimeoutRef.current);
+    if (detailsAbortRef.current) detailsAbortRef.current.abort();
+    setIsValidUrl(null);
+    const trimmedUrl = url.trim();
+    if (trimmedUrl.length <= 20) return;
+    validationTimeoutRef.current = window.setTimeout(async () => {
+      const requestId = ++validationRequestRef.current;
+      const valid = await validateWebhook(trimmedUrl);
+      if (requestId !== validationRequestRef.current) return;
+      setIsValidUrl(valid);
+      if (!valid) return;
+      const controller = new AbortController();
+      detailsAbortRef.current = controller;
+      const details = await getWebhookDetails(trimmedUrl, controller.signal);
+      if (requestId !== validationRequestRef.current) return;
+      if (details) {
+        setPayload(p => normalizePayload({
+          ...p,
+          username: details.name || p.username,
+          avatar_url: details.avatar_url || p.avatar_url
+        }));
+      }
+    }, 350);
   };
 
   const handleSend = async () => {
@@ -253,11 +297,39 @@ const App: React.FC = () => {
     reader.onload = (ev) => {
       try {
         const json = JSON.parse(ev.target?.result as string);
-        setPayload(json);
+        const normalized = normalizePayload(json);
+        setPayload(normalized);
+        setJsonText(JSON.stringify(normalized, null, 2));
+        setJsonError(null);
         setActiveView('editor');
       } catch (err) { alert("Invalid JSON file"); }
     };
     reader.readAsText(file);
+  };
+
+  const handleJsonChange = (value: string) => {
+    setJsonText(value);
+    try {
+      const parsed = JSON.parse(value);
+      const normalized = normalizePayload(parsed);
+      setPayload(normalized);
+      setJsonError(null);
+    } catch (err) {
+      setJsonError('Invalid JSON. Fix the syntax to update the preview.');
+    }
+  };
+
+  const applyTemplate = (nextPayload: WebhookPayload) => {
+    const normalized = normalizePayload(nextPayload);
+    setPayload(normalized);
+    setJsonText(JSON.stringify(normalized, null, 2));
+    setJsonError(null);
+    setActiveView('editor');
+  };
+
+  const clearHistory = () => {
+    setHistory([]);
+    localStorage.removeItem('be_history');
   };
 
   return (
@@ -354,7 +426,10 @@ const App: React.FC = () => {
                                  <IconButton icon={Icons.ChevronUp} onClick={() => moveEmbed(idx, 'up')} title="Move Up" />
                                  <IconButton icon={Icons.ChevronDown} onClick={() => moveEmbed(idx, 'down')} title="Move Down" />
                                  <IconButton icon={Icons.Trash} onClick={() => {
-                                    const ne = [...payload.embeds!]; ne.splice(idx, 1); setPayload({...payload, embeds: ne});
+                                    const ne = [...payload.embeds!];
+                                    ne.splice(idx, 1);
+                                    setPayload({...payload, embeds: ne});
+                                    setExpandedEmbeds(prev => prev.filter(i => i !== idx).map(i => (i > idx ? i - 1 : i)));
                                  }} danger title="Delete" />
                               </div>
                            </div>
@@ -454,17 +529,35 @@ const App: React.FC = () => {
                       {['everyone', 'roles', 'users'].map(type => (
                          <label key={type} className="flex items-center gap-3 cursor-pointer bg-[#2b2d31] p-2 rounded hover:bg-[#35373C] transition-colors">
                             <input type="checkbox" className="w-4 h-4 accent-[#5865F2]" 
-                               checked={payload.allowed_mentions?.parse.includes(type as any)}
+                               checked={allowedMentionsParse.includes(type as any)}
                                onChange={(e) => {
-                                  const current = payload.allowed_mentions?.parse || [];
+                                  const current = allowedMentionsParse;
                                   const newVal = e.target.checked ? [...current, type] : current.filter(t => t !== type);
-                                  setPayload({...payload, allowed_mentions: { ...payload.allowed_mentions, parse: newVal as any }});
+                                  setPayload(normalizePayload({...payload, allowed_mentions: { ...payload.allowed_mentions, parse: newVal as any }}));
                                }}
                             />
                             <span className="text-sm capitalize text-[#dbdee1]">{type}</span>
                          </label>
                       ))}
                    </div>
+                </div>
+                <div className="bg-[#1e1f22] p-4 rounded border border-[#111214]">
+                   <h3 className="text-sm font-bold text-white mb-2">Privacy</h3>
+                   <p className="text-xs text-[#949BA4] mb-4">Control how webhook URLs are stored on this device.</p>
+                   <label className="flex items-center gap-3 cursor-pointer bg-[#2b2d31] p-2 rounded hover:bg-[#35373C] transition-colors">
+                      <input
+                        type="checkbox"
+                        className="w-4 h-4 accent-[#5865F2]"
+                        checked={rememberUrl}
+                        onChange={(e) => {
+                          const nextValue = e.target.checked;
+                          setRememberUrl(nextValue);
+                          localStorage.setItem('be_remember_url', String(nextValue));
+                          if (!nextValue) localStorage.removeItem('be_last_url');
+                        }}
+                      />
+                      <span className="text-sm text-[#dbdee1]">Remember last webhook URL</span>
+                   </label>
                 </div>
                 <div className="bg-[#1e1f22] p-4 rounded border border-[#111214]">
                    <h3 className="text-sm font-bold text-white mb-2">Forum / Thread</h3>
@@ -484,8 +577,13 @@ const App: React.FC = () => {
                       <input type="file" className="hidden" accept=".json" onChange={importJSON} />
                    </label>
                 </div>
+                {jsonError && (
+                  <div className="text-xs text-red-400 bg-[#2b2d31] border border-[#3f1f23] rounded px-3 py-2 mb-2">
+                    {jsonError}
+                  </div>
+                )}
                 <div className="bg-[#1e1f22] flex-1 rounded p-1 border border-[#111214]">
-                   <textarea className="w-full h-full bg-transparent text-[#98c379] font-mono text-xs p-4 outline-none resize-none" value={JSON.stringify(payload, null, 2)} onChange={e => { try { setPayload(JSON.parse(e.target.value)); } catch(err){} }} />
+                   <textarea className="w-full h-full bg-transparent text-[#98c379] font-mono text-xs p-4 outline-none resize-none" value={jsonText} onChange={e => handleJsonChange(e.target.value)} />
                 </div>
              </div>
            )}
@@ -493,6 +591,9 @@ const App: React.FC = () => {
            {/* Tools & Templates & History */}
            {activeView === 'history' && (
              <div className="space-y-2 animate-fade-in">
+                <div className="flex justify-end">
+                  <button onClick={clearHistory} className="text-[10px] bg-[#404249] hover:bg-[#4f515a] text-white px-2 py-1 rounded font-bold">Clear History</button>
+                </div>
                 {history.map(h => (
                    <div key={h.id} className="bg-[#1e1f22] p-3 rounded flex justify-between items-center border border-[#111214] hover:border-[#5865F2]">
                       <div className="truncate flex-1 pr-2">
@@ -508,7 +609,7 @@ const App: React.FC = () => {
            {activeView === 'templates' && (
               <div className="grid grid-cols-1 gap-3 animate-fade-in">
                  {TEMPLATES.map((t, i) => (
-                    <div key={i} className="bg-[#1e1f22] p-4 rounded border border-[#111214] hover:border-[#5865F2] cursor-pointer group" onClick={() => { setPayload(t.payload); setActiveView('editor'); }}>
+                    <div key={i} className="bg-[#1e1f22] p-4 rounded border border-[#111214] hover:border-[#5865F2] cursor-pointer group" onClick={() => applyTemplate(t.payload)}>
                        <div className="font-bold text-sm text-white group-hover:text-[#5865F2]">{t.name}</div>
                        <div className="text-[10px] text-[#949BA4]">Click to apply preset</div>
                     </div>
